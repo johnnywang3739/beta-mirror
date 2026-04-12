@@ -10,7 +10,7 @@ import {
   logEvent,
 } from 'src/services/analytics/index.js'
 import { getModelStrings } from 'src/utils/model/modelStrings.js'
-import { getAPIProvider } from 'src/utils/model/providers.js'
+import { getAPIProvider, isOllamaProvider } from 'src/utils/model/providers.js'
 import {
   getIsNonInteractiveSession,
   preferThirdPartyAuthentication,
@@ -115,7 +115,8 @@ export function isAnthropicAuthEnabled(): boolean {
   const is3P =
     isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX) ||
-    isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)
+    isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY) ||
+    isOllamaProvider()
 
   // Check if user has configured an external API key source
   // This allows externally-provided API keys to work (without requiring proxy configuration)
@@ -229,6 +230,12 @@ export function getAnthropicApiKeyWithSource(
   key: null | string
   source: ApiKeySource
 } {
+  // Local Ollama only — never read env, keychain, apiKeyHelper, or FD for an
+  // Anthropic key (avoids accidental sends and matches user expectation).
+  if (isOllamaProvider()) {
+    return { key: null, source: 'none' }
+  }
+
   // --bare: hermetic auth. Only ANTHROPIC_API_KEY env or apiKeyHelper from
   // the --settings flag. Never touches keychain, config file, or approval
   // lists. 3P (Bedrock/Vertex/Foundry) uses provider creds, not this path.

@@ -1,4 +1,5 @@
 import { isEnvTruthy } from './envUtils.js'
+import { isOllamaProvider } from './model/providers.js'
 
 /**
  * Env vars to strip from subprocess environments when running inside GitHub
@@ -52,6 +53,16 @@ const GHA_SUBPROCESS_SCRUB = [
   'SSH_SIGNING_KEY',
 ] as const
 
+/** When using local Ollama, subprocesses never need Anthropic credentials — strip so Bash/hooks cannot expand them. */
+const OLLAMA_ANTHROPIC_SCRUB = [
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+] as const
+
 /**
  * Returns a copy of process.env with sensitive secrets stripped, for use when
  * spawning subprocesses (Bash tool, shell snapshot, MCP stdio servers, LSP
@@ -82,6 +93,16 @@ export function subprocessEnv(): NodeJS.ProcessEnv {
   // proxy is disabled or not registered (non-CCR), so this is a no-op outside
   // CCR containers.
   const proxyEnv = _getUpstreamProxyEnv?.() ?? {}
+
+  // Ollama mode: always strip Anthropic credentials from subprocesses —
+  // they are never needed and should not leak into Bash/hooks.
+  if (isOllamaProvider()) {
+    const env = { ...process.env, ...proxyEnv }
+    for (const k of OLLAMA_ANTHROPIC_SCRUB) {
+      delete env[k]
+    }
+    return env
+  }
 
   if (!isEnvTruthy(process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB)) {
     return Object.keys(proxyEnv).length > 0

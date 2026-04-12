@@ -15,6 +15,7 @@ import { getSmallFastModel } from 'src/utils/model/model.js'
 import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
+  isOllamaProvider,
 } from 'src/utils/model/providers.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
 import {
@@ -98,6 +99,16 @@ export async function getAnthropicClient({
   fetchOverride?: ClientOptions['fetch']
   source?: string
 }): Promise<Anthropic> {
+  if (isOllamaProvider()) {
+    // Ollama bypasses Anthropic SDK entirely; return a dummy client that is
+    // never used for chat (ollama.ts). Skip OAuth, API key headers, and
+    // ANTHROPIC_CUSTOM_HEADERS so nothing Anthropic-shaped leaks from this path.
+    return new Anthropic({
+      apiKey: 'ollama-placeholder',
+      dangerouslyAllowBrowser: true,
+    }) as Anthropic
+  }
+
   const containerId = process.env.CLAUDE_CODE_CONTAINER_ID
   const remoteSessionId = process.env.CLAUDE_CODE_REMOTE_SESSION_ID
   const clientApp = process.env.CLAUDE_AGENT_SDK_CLIENT_APP

@@ -24,6 +24,7 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
+import { queryModelOllama } from './ollama.js'
 import {
   getAttributionHeader,
   getCLISyspromptPrefix,
@@ -725,16 +726,22 @@ export async function queryModelWithoutStreaming({
   // Store the assistant message but continue consuming the generator to ensure
   // logAPISuccessAndDuration gets called (which happens after all yields)
   let assistantMessage: AssistantMessage | undefined
-  for await (const message of withStreamingVCR(messages, async function* () {
-    yield* queryModel(
-      messages,
-      systemPrompt,
-      thinkingConfig,
-      tools,
-      signal,
-      options,
-    )
-  })) {
+
+  const generator =
+    getAPIProvider() === 'ollama'
+      ? queryModelOllama(messages, systemPrompt, tools, signal, options)
+      : withStreamingVCR(messages, async function* () {
+          yield* queryModel(
+            messages,
+            systemPrompt,
+            thinkingConfig,
+            tools,
+            signal,
+            options,
+          )
+        })
+
+  for await (const message of generator) {
     if (message.type === 'assistant') {
       assistantMessage = message as AssistantMessage
     }
@@ -768,6 +775,10 @@ export async function* queryModelWithStreaming({
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
 > {
+  if (getAPIProvider() === 'ollama') {
+    yield* queryModelOllama(messages, systemPrompt, tools, signal, options)
+    return
+  }
   return yield* withStreamingVCR(messages, async function* () {
     yield* queryModel(
       messages,

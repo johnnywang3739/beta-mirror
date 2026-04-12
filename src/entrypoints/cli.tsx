@@ -36,6 +36,24 @@ if (feature("ABLATION_BASELINE") && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
     }
 }
 
+// Force TTY for Ollama mode in non-TTY terminals (e.g. Cursor remote).
+// Without this, the Ink REPL won't render because it checks process.stdout.isTTY.
+// eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level
+if (process.env.CLAUDE_CODE_USE_OLLAMA === "1" || process.env.CLAUDE_CODE_USE_OLLAMA === "true") {
+    const args = process.argv.slice(2);
+    const hasPrint = args.includes("-p") || args.includes("--print");
+    if (!hasPrint && !process.stdout.isTTY) {
+        // @ts-expect-error — isTTY is readonly but we need to override for Ink
+        process.stdout.isTTY = true;
+        // @ts-expect-error
+        process.stderr.isTTY = true;
+        // @ts-expect-error
+        process.stdin.isTTY = true;
+        process.stdout.columns ??= 120;
+        process.stdout.rows ??= 40;
+    }
+}
+
 /**
  * Bootstrap entrypoint - checks for special flags before loading the full CLI.
  * All imports are dynamic to minimize module evaluation for fast paths.

@@ -2313,7 +2313,6 @@ async function run(): Promise<CommanderCommand> {
       logForDebugging('Graceful shutdown initiated, skipping further initialization');
       return;
     }
-
     // Initialize LSP manager AFTER trust is established (or in non-interactive mode
     // where trust is implicit). This prevents plugin LSP servers from executing
     // code in untrusted directories before user consent.

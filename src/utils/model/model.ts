@@ -34,6 +34,9 @@ export type ModelName = string
 export type ModelSetting = ModelName | ModelAlias | null
 
 export function getSmallFastModel(): ModelName {
+  if (getAPIProvider() === 'ollama') {
+    return process.env.OLLAMA_MODEL || 'gemma4:26b'
+  }
   return process.env.ANTHROPIC_SMALL_FAST_MODEL || getDefaultHaikuModel()
 }
 
@@ -90,6 +93,9 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
  * @returns The resolved model name to use
  */
 export function getMainLoopModel(): ModelName {
+  if (getAPIProvider() === 'ollama') {
+    return process.env.OLLAMA_MODEL || 'gemma4:26b'
+  }
   const model = getUserSpecifiedModelSetting()
   if (model !== undefined && model !== null) {
     return parseUserSpecifiedModel(model)
@@ -176,6 +182,10 @@ export function getRuntimeMainLoopModel(params: {
  * @returns The default model setting to use
  */
 export function getDefaultMainLoopModelSetting(): ModelName | ModelAlias {
+  if (getAPIProvider() === 'ollama') {
+    return process.env.OLLAMA_MODEL || 'gemma4:26b'
+  }
+
   // Ants default to defaultModel from flag config, or Opus 1M if not configured
   if (process.env.USER_TYPE === 'ant') {
     return (
@@ -393,6 +403,9 @@ function maskModelCodename(baseName: string): string {
 }
 
 export function renderModelName(model: ModelName): string {
+  if (getAPIProvider() === 'ollama') {
+    return `Ollama: ${model}`
+  }
   const publicName = getPublicModelDisplayName(model)
   if (publicName) {
     return publicName
