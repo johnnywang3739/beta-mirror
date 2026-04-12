@@ -15,6 +15,7 @@ const result = await Bun.build({
     target: "bun",
     splitting: true,
     define: getMacroDefines(),
+    
 });
 
 if (!result.success) {

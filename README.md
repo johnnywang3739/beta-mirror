@@ -432,6 +432,4 @@ claude-code/
 | `EXPERIMENTAL_SKILL_SEARCH` | 实验性 Skill 搜索索引 |
 | `TORCH` | Torch 功能（具体用途未知，可能是某种高亮/追踪机制） |
 
-## 许可证
 
-本项目仅供学习研究用途。Claude Code 的所有权利归 [Anthropic](https://www.anthropic.com/) 所有。
