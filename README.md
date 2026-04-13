@@ -44,6 +44,20 @@
 bun install
 ```
 
+**一行安装全局命令 `claude-js`（需已安装 `curl` + `git`；会自动装 Bun）**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/claude-code-best/claude-code/main/scripts/install-cli.sh | bash
+```
+
+装好后若提示 `command not found`，把 Bun 的 bin 加进 PATH（可写进 `~/.bashrc`）：
+
+```bash
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+说明：`bun install -g .` 对**本地目录**不会稳定生成全局可执行文件；本项目用 **`bun link`** 注册 CLI，可执行文件在 `~/.bun/bin/claude-js`。已在仓库里的同学可直接：`bun run build && bun link`。
+
 ### 运行
 
 ```bash
@@ -53,6 +67,32 @@ bun run dev
 # 构建
 bun run build
 ```
+
+**全局 `bun link` 后工作目录不对？** 入口会在加载主程序前读取 `process.cwd()`。若界面始终显示在 `claude-code` 仓库根目录，多半是当前 shell 的 cwd 实际就是该目录（例如 Cursor 终端默认开在仓库根），或全局链接导致启动时 cwd 落在安装路径。可在启动前强制目录：
+
+```bash
+export CLAUDE_CODE_CWD="$PWD"   # 或绝对路径，如 /home/you/projects/foo
+CLAUDE_CODE_USE_OLLAMA=1 OLLAMA_MODEL=gemma4:26b claude-js
+```
+
+推荐写进别名：`alias claude-local='CLAUDE_CODE_CWD="$PWD" CLAUDE_CODE_USE_OLLAMA=1 OLLAMA_MODEL=gemma4:26b claude-js'`
+
+### Ollama Context Window & Output Tokens
+
+The adapter uses Ollama's native `/api/chat` endpoint for full control over context size.
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `OLLAMA_NUM_CTX` | `131072` (128K) | Context window in tokens. Gemma 4 26B supports up to 256K (262144). |
+| `OLLAMA_MAX_TOKENS` | `16384` (16K) | Max output tokens per response. |
+
+Example — maximise context for Gemma 4 26B on a large-memory system:
+
+```bash
+alias claude-local='CLAUDE_CODE_CWD="$PWD" CLAUDE_CODE_USE_OLLAMA=1 OLLAMA_MODEL=gemma4:26b OLLAMA_NUM_CTX=131072 OLLAMA_MAX_TOKENS=16384 claude-js'
+```
+
+> **Memory note**: Larger `num_ctx` requires more RAM for the KV cache. On a DGX Spark (128 GB unified), 128K is safe. 256K (set `OLLAMA_NUM_CTX=262144`) may work but will use significantly more memory — monitor with `ollama ps`.
 
 构建采用 code splitting 多文件打包（`build.ts`），产物输出到 `dist/` 目录（入口 `dist/cli.js` + 约 450 个 chunk 文件）。
 

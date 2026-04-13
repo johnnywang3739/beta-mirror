@@ -312,13 +312,29 @@ export const FileEditTool = buildTool({
 
     const file = fileContent
 
-    // Use findActualString to handle quote normalization
+    // Use findActualString to handle quote normalization and whitespace
     const actualOldString = findActualString(file, old_string)
     if (!actualOldString) {
+      // Build a hint showing the closest matching line in the file so models
+      // (especially smaller/local ones) can self-correct on retry.
+      const firstSearchLine = old_string.split('\n').find(l => l.trim() !== '')?.trim() ?? ''
+      let hint = ''
+      if (firstSearchLine.length > 0) {
+        const fileLines = file.split('\n')
+        const candidates = fileLines
+          .map((l, idx) => ({ line: l, num: idx + 1 }))
+          .filter(({ line }) => line.includes(firstSearchLine))
+        if (candidates.length > 0 && candidates.length <= 5) {
+          const preview = candidates.map(c => `  Line ${c.num}: ${c.line}`).join('\n')
+          hint = `\nLines containing "${firstSearchLine}":\n${preview}\nMake sure old_string matches the file content exactly (including indentation and special characters). Re-read the file to see its current content.`
+        } else {
+          hint = '\nThe old_string does not appear in the file. Re-read the file to see its current content before retrying the edit.'
+        }
+      }
       return {
         result: false,
         behavior: 'ask',
-        message: `String to replace not found in file.\nString: ${old_string}`,
+        message: `String to replace not found in file.${hint}\nString: ${old_string}`,
         meta: {
           isFilePathAbsolute: String(isAbsolute(file_path)),
         },

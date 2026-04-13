@@ -120,6 +120,62 @@ describe("findActualString", () => {
     const result = findActualString("hello", "");
     expect(result).toBe("");
   });
+
+  test("matches when file has trailing whitespace that search does not", () => {
+    const fileContent = "  if (x) {  \n    doStuff();  \n  }";
+    const search = "  if (x) {\n    doStuff();\n  }";
+    const result = findActualString(fileContent, search);
+    expect(result).toBe("  if (x) {  \n    doStuff();  \n  }");
+  });
+
+  test("matches when search has trailing whitespace that file does not", () => {
+    const fileContent = "  if (x) {\n    doStuff();\n  }";
+    const search = "  if (x) {   \n    doStuff();   \n  }";
+    const result = findActualString(fileContent, search);
+    expect(result).toBe("  if (x) {\n    doStuff();\n  }");
+  });
+
+  test("whitespace fallback returns original lines preserving trailing whitespace", () => {
+    const fileContent = "line1\nline2  \nline3\nline4";
+    const search = "line2\nline3";
+    const result = findActualString(fileContent, search);
+    // Should return the original file lines (with trailing spaces)
+    expect(result).toBe("line2  \nline3");
+  });
+
+  test("whitespace fallback does not match when content differs significantly", () => {
+    const fileContent = "  if (x) {\n    doStuff();\n  }";
+    const search = "  while (z) {\n    other();\n  }";
+    expect(findActualString(fileContent, search)).toBeNull();
+  });
+
+  test("fuzzy matching finds block with minor typo in variable name", () => {
+    const fileContent = "void foo() {\n    int current_piece_x = 0;\n    int current_piece_y = 0;\n}";
+    const search = "void foo() {\n    int current_piecex = 0;\n    int current_piece_y = 0;\n}";
+    const result = findActualString(fileContent, search);
+    expect(result).toBe("void foo() {\n    int current_piece_x = 0;\n    int current_piece_y = 0;\n}");
+  });
+
+  test("fuzzy matching returns null when lines differ too much", () => {
+    const fileContent = "void foo() {\n    int x = 0;\n}";
+    const search = "void bar() {\n    string name = '';\n}";
+    expect(findActualString(fileContent, search)).toBeNull();
+  });
+
+  test("fuzzy matching does not activate for single-line searches", () => {
+    const fileContent = "int current_piece_x = 0;";
+    const search = "int current_piecex = 0;";
+    // Single-line fuzzy is disabled to avoid false positives on partial matches
+    expect(findActualString(fileContent, search)).toBeNull();
+  });
+
+  test("single-line exact substring match takes precedence over whitespace fallback", () => {
+    const fileContent = "line1\n    doStuff();   \nline3";
+    const search = "    doStuff();";
+    const result = findActualString(fileContent, search);
+    // Exact includes() match fires first, returns the search string as-is
+    expect(result).toBe("    doStuff();");
+  });
 });
 
 // ─── preserveQuoteStyle ─────────────────────────────────────────────────

@@ -65,7 +65,7 @@ export function stripTrailingWhitespace(str: string): string {
 
 /**
  * Finds the actual string in the file content that matches the search string,
- * accounting for quote normalization
+ * accounting for quote normalization and trailing whitespace differences.
  * @param fileContent The file content to search in
  * @param searchString The string to search for
  * @returns The actual string found in the file, or null if not found
@@ -87,6 +87,112 @@ export function findActualString(
   if (searchIndex !== -1) {
     // Find the actual string in the file that matches
     return fileContent.substring(searchIndex, searchIndex + searchString.length)
+  }
+
+  // Try with trailing whitespace stripped from each line.
+  // Smaller / local models often produce old_string with slightly different
+  // trailing whitespace than what's actually on disk.
+  const wsMatch = findWithLineNormalization(fileContent, searchString, lineExactMatch)
+  if (wsMatch !== null) {
+    return wsMatch
+  }
+
+  // Last resort: fuzzy line-by-line matching. Tolerates small character-level
+  // differences per line (typos, wrong characters, minor edits) that local
+  // models frequently produce. Requires >=85% similarity on EVERY line to
+  // avoid false positives.
+  if (searchString.includes('\n')) {
+    const fuzzyMatch = findWithLineNormalization(fileContent, searchString, lineFuzzyMatch)
+    if (fuzzyMatch !== null) {
+      return fuzzyMatch
+    }
+  }
+
+  return null
+}
+
+/** Returns true when two lines match after trimming trailing whitespace. */
+function lineExactMatch(fileLine: string, searchLine: string): boolean {
+  return fileLine.trimEnd() === searchLine.trimEnd()
+}
+
+/** Returns true when two lines are at least 85% similar (character-level). */
+function lineFuzzyMatch(fileLine: string, searchLine: string): boolean {
+  const a = fileLine.trimEnd()
+  const b = searchLine.trimEnd()
+  if (a === b) return true
+  if (a.length === 0 && b.length === 0) return true
+  if (a.length === 0 || b.length === 0) return false
+  const sim = lineSimilarity(a, b)
+  return sim >= 0.85
+}
+
+/**
+ * Character-level similarity between two strings using longest common
+ * subsequence ratio: 2 * LCS_length / (a.length + b.length).
+ * Capped to O(n*m) with n,m <= ~500 chars per line so it's fast enough.
+ */
+function lineSimilarity(a: string, b: string): number {
+  if (a === b) return 1
+  const m = a.length
+  const n = b.length
+  if (m === 0 || n === 0) return 0
+
+  // For very long lines, fall back to simple common-prefix/suffix ratio
+  if (m > 500 || n > 500) {
+    let prefix = 0
+    const minLen = Math.min(m, n)
+    while (prefix < minLen && a[prefix] === b[prefix]) prefix++
+    let suffix = 0
+    while (suffix < minLen - prefix && a[m - 1 - suffix] === b[n - 1 - suffix]) suffix++
+    return (2 * (prefix + suffix)) / (m + n)
+  }
+
+  // Standard LCS via two-row DP
+  let prev = new Uint16Array(n + 1)
+  let curr = new Uint16Array(n + 1)
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        curr[j] = prev[j - 1] + 1
+      } else {
+        curr[j] = Math.max(prev[j], curr[j - 1])
+      }
+    }
+    ;[prev, curr] = [curr, prev]
+    curr.fill(0)
+  }
+  return (2 * prev[n]) / (m + n)
+}
+
+/**
+ * Generic line-by-line search over file content. Slides a window of
+ * searchLines.length over fileLines and uses the provided `match` predicate
+ * to compare each pair of lines. Returns the corresponding original file
+ * lines on the first hit, or null.
+ */
+function findWithLineNormalization(
+  fileContent: string,
+  searchString: string,
+  match: (fileLine: string, searchLine: string) => boolean,
+): string | null {
+  const fileLines = fileContent.split('\n')
+  const searchLines = searchString.split('\n')
+
+  if (searchLines.length === 0) return null
+
+  const limit = fileLines.length - searchLines.length
+  for (let i = 0; i <= limit; i++) {
+    let matched = true
+    for (let j = 0; j < searchLines.length; j++) {
+      if (!match(fileLines[i + j], searchLines[j])) {
+        matched = false
+        break
+      }
+    }
+    if (matched) {
+      return fileLines.slice(i, i + searchLines.length).join('\n')
+    }
   }
 
   return null

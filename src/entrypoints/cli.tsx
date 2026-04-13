@@ -308,6 +308,36 @@ async function main(): Promise<void> {
         process.env.CLAUDE_CODE_SIMPLE = "1";
     }
 
+    // Force process cwd before main.tsx loads bootstrap/state (which snapshots cwd).
+    // Some environments leave cwd at the linked package dir (e.g. bun link →
+    // ~/.bun/install/.../claude-js) or the IDE workspace root instead of the
+    // directory where you typed the command. Set CLAUDE_CODE_CWD in your shell
+    // (often CLAUDE_CODE_CWD="$PWD") so the banner, tools, and model context
+    // match the project folder you intend.
+    const cwdOverride = process.env.CLAUDE_CODE_CWD?.trim();
+    if (cwdOverride) {
+        const { resolve, isAbsolute } = await import("node:path");
+        const { homedir } = await import("node:os");
+        let target: string;
+        if (cwdOverride.startsWith("~/")) {
+            target = resolve(homedir(), cwdOverride.slice(2));
+        } else if (!isAbsolute(cwdOverride)) {
+            target = resolve(process.cwd(), cwdOverride);
+        } else {
+            target = resolve(cwdOverride);
+        }
+        try {
+            process.chdir(target);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            // biome-ignore lint/suspicious/noConsole: intentional startup error
+            console.error(
+                `CLAUDE_CODE_CWD=${cwdOverride}: cannot chdir to ${target}: ${msg}`,
+            );
+            process.exit(1);
+        }
+    }
+
     // No special flags detected, load and run the full CLI
     const { startCapturingEarlyInput } = await import("../utils/earlyInput.js");
     startCapturingEarlyInput();

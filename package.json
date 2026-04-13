@@ -36,6 +36,7 @@
   ],
   "scripts": {
     "build": "bun run build.ts",
+    "install:cli": "bun run build && bun link",
     "dev": "bun run scripts/dev.ts",
     "prepublishOnly": "bun run build",
     "lint": "biome lint src/",

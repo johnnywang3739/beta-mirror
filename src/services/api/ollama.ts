@@ -2,8 +2,13 @@
  * Ollama adapter for Claude Code.
  *
  * Converts between the internal Anthropic-style message format and
- * OpenAI-compatible chat completions used by Ollama's /v1/chat/completions endpoint.
+ * Ollama's native /api/chat endpoint. Uses the native API (not the
+ * OpenAI-compatible layer) to get full control over num_ctx and num_predict.
  * Handles streaming, tool calling, and message normalization.
+ *
+ * Environment variables:
+ *   OLLAMA_NUM_CTX       — Context window size in tokens (default: 131072 = 128K)
+ *   OLLAMA_MAX_TOKENS    — Max output tokens per response (default: 16384)
  */
 import { randomUUID } from 'crypto'
 import type {
@@ -28,24 +33,45 @@ import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
 import type { Options } from './claude.js'
 
 // ---------------------------------------------------------------------------
-// OpenAI-compatible types (subset needed for Ollama)
+// Ollama context/output configuration
 // ---------------------------------------------------------------------------
 
-interface OAIMessage {
+const DEFAULT_NUM_CTX = 131_072   // 128K — safe for Gemma 4 26B on 128GB systems
+const DEFAULT_MAX_TOKENS = 16_384 // 16K output per turn
+
+function getOllamaNumCtx(): number {
+  const val = process.env.OLLAMA_NUM_CTX
+  if (val) {
+    const n = parseInt(val, 10)
+    if (!isNaN(n) && n > 0) return n
+  }
+  return DEFAULT_NUM_CTX
+}
+
+function getOllamaMaxTokens(): number {
+  const val = process.env.OLLAMA_MAX_TOKENS
+  if (val) {
+    const n = parseInt(val, 10)
+    if (!isNaN(n) && n > 0) return n
+  }
+  return DEFAULT_MAX_TOKENS
+}
+
+// ---------------------------------------------------------------------------
+// Message types for Ollama native /api/chat
+// ---------------------------------------------------------------------------
+
+interface OllamaMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string | null
-  tool_calls?: OAIToolCall[]
-  tool_call_id?: string
-  name?: string
+  content: string
+  tool_calls?: OllamaToolCall[]
 }
 
-interface OAIToolCall {
-  id: string
-  type: 'function'
-  function: { name: string; arguments: string }
+interface OllamaToolCall {
+  function: { name: string; arguments: Record<string, unknown> }
 }
 
-interface OAITool {
+interface OllamaTool {
   type: 'function'
   function: {
     name: string
@@ -54,33 +80,29 @@ interface OAITool {
   }
 }
 
-interface OAIStreamDelta {
-  role?: string
-  content?: string | null
-  tool_calls?: {
-    index: number
-    id?: string
-    type?: string
-    function?: { name?: string; arguments?: string }
-  }[]
-}
-
-interface OAIStreamChoice {
-  index: number
-  delta: OAIStreamDelta
-  finish_reason: string | null
-}
-
-interface OAIStreamChunk {
-  id: string
-  object: string
+/** A single NDJSON chunk from Ollama's /api/chat streaming response. */
+interface OllamaChatChunk {
   model: string
-  choices: OAIStreamChoice[]
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+  created_at: string
+  message: {
+    role: string
+    content: string
+    tool_calls?: {
+      function: { name: string; arguments: Record<string, unknown> }
+    }[]
+  }
+  done: boolean
+  done_reason?: string
+  total_duration?: number
+  load_duration?: number
+  prompt_eval_count?: number
+  prompt_eval_duration?: number
+  eval_count?: number
+  eval_duration?: number
 }
 
 // ---------------------------------------------------------------------------
-// Message conversion: Internal (Anthropic-style) → OpenAI chat format
+// Message conversion: Internal (Anthropic-style) → Ollama native chat format
 // ---------------------------------------------------------------------------
 
 function systemPromptToString(systemPrompt: SystemPrompt): string {
@@ -115,10 +137,10 @@ function contentToString(content: MessageContent | undefined): string {
 
 /**
  * Extract tool_result blocks from a user message's content array and
- * return them as separate OAI "tool" role messages, plus the remaining text.
+ * return them as separate Ollama "tool" role messages, plus the remaining text.
  */
-function extractToolResults(msg: Message): OAIMessage[] {
-  const results: OAIMessage[] = []
+function extractToolResults(msg: Message): OllamaMessage[] {
+  const results: OllamaMessage[] = []
   const textParts: string[] = []
 
   if (!msg.message?.content || typeof msg.message.content === 'string') {
@@ -137,7 +159,6 @@ function extractToolResults(msg: Message): OAIMessage[] {
       }
       results.push({
         role: 'tool',
-        tool_call_id: String(block.tool_use_id || ''),
         content: resultContent,
       })
     } else if (block.type === 'text' && block.text) {
@@ -145,81 +166,83 @@ function extractToolResults(msg: Message): OAIMessage[] {
     }
   }
 
-  const oai: OAIMessage[] = []
+  const out: OllamaMessage[] = []
   if (results.length > 0) {
-    oai.push(...results)
+    out.push(...results)
   }
   if (textParts.length > 0) {
-    oai.push({ role: 'user', content: textParts.join('\n') })
+    out.push({ role: 'user', content: textParts.join('\n') })
   }
-  if (oai.length === 0) {
-    oai.push({ role: 'user', content: '' })
+  if (out.length === 0) {
+    out.push({ role: 'user', content: '' })
   }
-  return oai
+  return out
 }
 
 /**
- * Convert an assistant message with potential tool_use blocks to OAI format.
+ * Convert an assistant message with potential tool_use blocks to Ollama native format.
+ * Ollama expects tool_calls with function.arguments as an object (not a JSON string).
  */
-function convertAssistantMessage(msg: Message): OAIMessage {
-  const oai: OAIMessage = { role: 'assistant', content: null }
+function convertAssistantMessage(msg: Message): OllamaMessage {
+  const out: OllamaMessage = { role: 'assistant', content: '' }
   const textParts: string[] = []
-  const toolCalls: OAIToolCall[] = []
+  const toolCalls: OllamaToolCall[] = []
 
   if (!msg.message?.content || typeof msg.message.content === 'string') {
-    oai.content = contentToString(msg.message?.content)
-    return oai
+    out.content = contentToString(msg.message?.content)
+    return out
   }
 
   for (const block of msg.message.content as Array<Record<string, unknown>>) {
     if (block.type === 'text' && block.text) {
       textParts.push(String(block.text))
     } else if (block.type === 'tool_use') {
+      let args: Record<string, unknown>
+      if (typeof block.input === 'string') {
+        try { args = JSON.parse(block.input) } catch { args = {} }
+      } else {
+        args = (block.input as Record<string, unknown>) ?? {}
+      }
       toolCalls.push({
-        id: String(block.id || randomUUID()),
-        type: 'function',
         function: {
           name: String(block.name || ''),
-          arguments:
-            typeof block.input === 'string'
-              ? block.input
-              : JSON.stringify(block.input ?? {}),
+          arguments: args,
         },
       })
     }
   }
 
-  if (textParts.length > 0) oai.content = textParts.join('\n')
-  if (toolCalls.length > 0) oai.tool_calls = toolCalls
-  return oai
+  if (textParts.length > 0) out.content = textParts.join('\n')
+  if (toolCalls.length > 0) out.tool_calls = toolCalls
+  return out
 }
 
 export function convertMessagesForOllama(
   messages: Message[],
   systemPrompt: SystemPrompt,
   tools: Tools,
-): OAIMessage[] {
-  const oaiMessages: OAIMessage[] = []
+): OllamaMessage[] {
+  const ollamaMessages: OllamaMessage[] = []
 
   const sysText = systemPromptToString(systemPrompt)
   if (sysText) {
-    oaiMessages.push({ role: 'system', content: sysText })
+    ollamaMessages.push({ role: 'system', content: sysText })
   }
 
   const normalized = normalizeMessagesForAPI(messages, tools)
   for (const msg of normalized) {
     if (msg.type === 'user' || msg.message?.role === 'user') {
-      oaiMessages.push(...extractToolResults(msg))
+      ollamaMessages.push(...extractToolResults(msg))
     } else if (msg.type === 'assistant' || msg.message?.role === 'assistant') {
-      oaiMessages.push(convertAssistantMessage(msg))
+      ollamaMessages.push(convertAssistantMessage(msg))
     }
   }
 
-  return oaiMessages
+  return ollamaMessages
 }
 
 // ---------------------------------------------------------------------------
-// Tool conversion: Internal (Anthropic-style) → OpenAI function format
+// Tool conversion: Internal (Anthropic-style) → Ollama native function format
 // ---------------------------------------------------------------------------
 
 function getToolParameters(tool: Tool): Record<string, unknown> {
@@ -240,7 +263,7 @@ function getToolParameters(tool: Tool): Record<string, unknown> {
  * Build tool descriptions by calling each tool's prompt() (async).
  * Must be called before the fetch so descriptions are ready.
  */
-export async function convertToolsForOllama(tools: Tools): Promise<OAITool[]> {
+export async function convertToolsForOllama(tools: Tools): Promise<OllamaTool[]> {
   const results = await Promise.all(
     tools.map(async (tool) => {
       const parameters = getToolParameters(tool)
@@ -274,12 +297,12 @@ export async function convertToolsForOllama(tools: Tools): Promise<OAITool[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Streaming SSE parser
+// Streaming NDJSON parser for Ollama native /api/chat
 // ---------------------------------------------------------------------------
 
-async function* parseSSEStream(
+async function* parseNDJSONStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-): AsyncGenerator<OAIStreamChunk> {
+): AsyncGenerator<OllamaChatChunk> {
   const decoder = new TextDecoder()
   let buffer = ''
 
@@ -293,21 +316,26 @@ async function* parseSSEStream(
 
     for (const line of lines) {
       const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith(':')) continue
-      if (trimmed === 'data: [DONE]') return
-      if (trimmed.startsWith('data: ')) {
-        try {
-          yield JSON.parse(trimmed.slice(6)) as OAIStreamChunk
-        } catch {
-          // Skip malformed JSON chunks
-        }
+      if (!trimmed) continue
+      try {
+        yield JSON.parse(trimmed) as OllamaChatChunk
+      } catch {
+        // Skip malformed JSON lines
       }
+    }
+  }
+  // Flush remaining buffer
+  if (buffer.trim()) {
+    try {
+      yield JSON.parse(buffer.trim()) as OllamaChatChunk
+    } catch {
+      // ignore
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Main query function for Ollama
+// Main query function for Ollama (native /api/chat)
 // ---------------------------------------------------------------------------
 
 export async function* queryModelOllama(
@@ -319,24 +347,30 @@ export async function* queryModelOllama(
 ): AsyncGenerator<StreamEvent | AssistantMessage | SystemAPIErrorMessage, void> {
   const baseUrl = getOllamaBaseUrl()
   const model = getOllamaModel()
-  const oaiMessages = convertMessagesForOllama(messages, systemPrompt, tools)
-  const oaiTools = tools.length > 0 ? await convertToolsForOllama(tools) : undefined
+  const numCtx = getOllamaNumCtx()
+  const maxTokens = getOllamaMaxTokens()
+  const ollamaMessages = convertMessagesForOllama(messages, systemPrompt, tools)
+  const ollamaTools = tools.length > 0 ? await convertToolsForOllama(tools) : undefined
 
-  logForDebugging(`[Ollama] Sending request to ${baseUrl}/v1/chat/completions model=${model} messages=${oaiMessages.length} tools=${oaiTools?.length ?? 0}`)
+  logForDebugging(`[Ollama] POST ${baseUrl}/api/chat model=${model} messages=${ollamaMessages.length} tools=${ollamaTools?.length ?? 0} num_ctx=${numCtx} num_predict=${maxTokens}`)
 
   const body: Record<string, unknown> = {
     model,
-    messages: oaiMessages,
+    messages: ollamaMessages,
     stream: true,
-    temperature: options.temperatureOverride ?? 0,
+    options: {
+      num_ctx: numCtx,
+      num_predict: maxTokens,
+      temperature: options.temperatureOverride ?? 0,
+    },
   }
-  if (oaiTools && oaiTools.length > 0) {
-    body.tools = oaiTools
+  if (ollamaTools && ollamaTools.length > 0) {
+    body.tools = ollamaTools
   }
 
   let response: Response
   try {
-    response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    response = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -377,13 +411,11 @@ export async function* queryModelOllama(
     return
   }
 
-  // Accumulate the full response
   let fullText = ''
-  const toolCallAccum = new Map<
-    number,
-    { id: string; name: string; arguments: string }
-  >()
-  let finishReason: string | null = null
+  const toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[] = []
+  let inputTokens = 0
+  let outputTokens = 0
+  let doneReason: string | null = null
   const messageId = randomUUID()
   const start = Date.now()
 
@@ -400,53 +432,46 @@ export async function* queryModelOllama(
   const reader = response.body.getReader()
   let firstChunk = true
 
-  for await (const chunk of parseSSEStream(reader)) {
-    if (!chunk.choices?.[0]) continue
-    const choice = chunk.choices[0]
-    const delta = choice.delta
-
+  for await (const chunk of parseNDJSONStream(reader)) {
     if (firstChunk) {
       logForDebugging(`[Ollama] First chunk received in ${Date.now() - start}ms`)
       firstChunk = false
     }
 
-    // Accumulate text content
-    if (delta.content) {
-      fullText += delta.content
+    const msg = chunk.message
+    if (msg?.content) {
+      fullText += msg.content
       yield {
         type: 'stream_event',
         event: {
           type: 'content_block_delta',
-          delta: { type: 'text_delta', text: delta.content },
+          delta: { type: 'text_delta', text: msg.content },
         },
       }
     }
 
-    // Accumulate tool calls
-    if (delta.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        const existing = toolCallAccum.get(tc.index)
-        if (!existing) {
-          toolCallAccum.set(tc.index, {
-            id: tc.id || `call_${randomUUID()}`,
-            name: tc.function?.name || '',
-            arguments: tc.function?.arguments || '',
-          })
-        } else {
-          if (tc.function?.name) existing.name = tc.function.name
-          if (tc.function?.arguments) existing.arguments += tc.function.arguments
-        }
+    // Tool calls arrive in the final message (done: true)
+    if (msg?.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        toolCalls.push({
+          id: `call_${randomUUID()}`,
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        })
       }
     }
 
-    if (choice.finish_reason) {
-      finishReason = choice.finish_reason
+    if (chunk.done) {
+      doneReason = chunk.done_reason ?? 'stop'
+      inputTokens = chunk.prompt_eval_count ?? 0
+      outputTokens = chunk.eval_count ?? 0
+      logForDebugging(`[Ollama] Done: ${inputTokens} input tokens, ${outputTokens} output tokens, reason=${doneReason}`)
     }
   }
 
-  logForDebugging(`[Ollama] Stream complete: ${fullText.length} chars, ${toolCallAccum.size} tool calls, finish=${finishReason}`)
+  logForDebugging(`[Ollama] Stream complete: ${fullText.length} chars, ${toolCalls.length} tool calls, reason=${doneReason}`)
 
-  // Build the AssistantMessage content blocks in Anthropic format
+  // Build AssistantMessage content blocks in Anthropic format
   const contentBlocks: BetaContentBlock[] = []
 
   if (fullText) {
@@ -456,18 +481,12 @@ export async function* queryModelOllama(
     } as BetaContentBlock)
   }
 
-  for (const [, tc] of toolCallAccum) {
-    let parsedInput: Record<string, unknown> = {}
-    try {
-      parsedInput = JSON.parse(tc.arguments)
-    } catch {
-      parsedInput = {}
-    }
+  for (const tc of toolCalls) {
     contentBlocks.push({
       type: 'tool_use',
       id: tc.id,
       name: tc.name,
-      input: parsedInput,
+      input: tc.arguments,
     } as unknown as BetaContentBlock)
   }
 
@@ -484,10 +503,7 @@ export async function* queryModelOllama(
     options.agentId,
   ) as MessageContent
 
-  const stopReason =
-    finishReason === 'tool_calls' || finishReason === 'function_call'
-      ? 'tool_use'
-      : 'end_turn'
+  const stopReason = toolCalls.length > 0 ? 'tool_use' : 'end_turn'
 
   const assistantMsg: AssistantMessage = {
     type: 'assistant',
@@ -500,8 +516,8 @@ export async function* queryModelOllama(
       model,
       stop_reason: stopReason,
       usage: {
-        input_tokens: 0,
-        output_tokens: 0,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
       },

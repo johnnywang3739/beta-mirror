@@ -4,6 +4,7 @@ import { getGlobalConfig } from './config.js'
 import { isEnvTruthy } from './envUtils.js'
 import { getCanonicalName } from './model/model.js'
 import { getModelCapability } from './model/modelCapabilities.js'
+import { isOllamaProvider } from './model/providers.js'
 
 // Model context window size (200k tokens for all models right now)
 export const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
@@ -52,6 +53,16 @@ export function getContextWindowForModel(
   model: string,
   betas?: string[],
 ): number {
+  // Ollama: honour OLLAMA_NUM_CTX so auto-compact triggers at the right threshold
+  if (isOllamaProvider()) {
+    const val = process.env.OLLAMA_NUM_CTX
+    if (val) {
+      const n = parseInt(val, 10)
+      if (!isNaN(n) && n > 0) return n
+    }
+    return 131_072 // 128K default for Ollama
+  }
+
   // Allow override via environment variable (ant-only)
   // This takes precedence over all other context window resolution, including 1M detection,
   // so users can cap the effective context window for local decisions (auto-compact, etc.)
@@ -152,6 +163,14 @@ export function getModelMaxOutputTokens(model: string): {
 } {
   let defaultTokens: number
   let upperLimit: number
+
+  // Ollama: respect OLLAMA_MAX_TOKENS
+  if (isOllamaProvider()) {
+    const val = process.env.OLLAMA_MAX_TOKENS
+    const n = val ? parseInt(val, 10) : NaN
+    const limit = !isNaN(n) && n > 0 ? n : 16_384
+    return { default: limit, upperLimit: limit }
+  }
 
   if (process.env.USER_TYPE === 'ant') {
     const antModel = resolveAntModel(model.toLowerCase())
