@@ -24,6 +24,7 @@ import {
 import type { SystemPrompt } from '../../utils/systemPromptType.js'
 import { getOllamaBaseUrl, getOllamaModel } from '../../utils/model/providers.js'
 import { logForDebugging } from '../../utils/debug.js'
+import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
 import type { Options } from './claude.js'
 
 // ---------------------------------------------------------------------------
@@ -221,28 +222,55 @@ export function convertMessagesForOllama(
 // Tool conversion: Internal (Anthropic-style) → OpenAI function format
 // ---------------------------------------------------------------------------
 
-export function convertToolsForOllama(tools: Tools): OAITool[] {
-  return tools.map(tool => {
-    let parameters: Record<string, unknown> = { type: 'object', properties: {} }
-    if ('inputJSONSchema' in tool && tool.inputJSONSchema) {
-      parameters = tool.inputJSONSchema as Record<string, unknown>
-    } else if (tool.inputSchema) {
+function getToolParameters(tool: Tool): Record<string, unknown> {
+  if ('inputJSONSchema' in tool && tool.inputJSONSchema) {
+    return tool.inputJSONSchema as Record<string, unknown>
+  }
+  if (tool.inputSchema) {
+    try {
+      return zodToJsonSchema(tool.inputSchema) as Record<string, unknown>
+    } catch (e) {
+      logForDebugging(`[Ollama] zodToJsonSchema failed for ${tool.name}: ${e}`)
+    }
+  }
+  return { type: 'object', properties: {} }
+}
+
+/**
+ * Build tool descriptions by calling each tool's prompt() (async).
+ * Must be called before the fetch so descriptions are ready.
+ */
+export async function convertToolsForOllama(tools: Tools): Promise<OAITool[]> {
+  const results = await Promise.all(
+    tools.map(async (tool) => {
+      const parameters = getToolParameters(tool)
+
+      let description = ''
       try {
-        const { zodToJsonSchema } = require('src/utils/api.js')
-        parameters = zodToJsonSchema(tool.inputSchema) as Record<string, unknown>
+        description = await tool.prompt({
+          getToolPermissionContext: async () => ({} as any),
+          tools,
+          agents: [],
+        })
       } catch {
-        // Fall back to empty schema
+        // prompt() may fail without real context — fall back
       }
-    }
-    return {
-      type: 'function' as const,
-      function: {
-        name: tool.name,
-        description: typeof tool.prompt === 'function' ? tool.name : String(tool.prompt ?? tool.name),
-        parameters,
-      },
-    }
-  })
+
+      if (!description) {
+        description = (tool as any).searchHint || tool.name
+      }
+
+      return {
+        type: 'function' as const,
+        function: {
+          name: tool.name,
+          description,
+          parameters,
+        },
+      }
+    }),
+  )
+  return results
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +320,7 @@ export async function* queryModelOllama(
   const baseUrl = getOllamaBaseUrl()
   const model = getOllamaModel()
   const oaiMessages = convertMessagesForOllama(messages, systemPrompt, tools)
-  const oaiTools = tools.length > 0 ? convertToolsForOllama(tools) : undefined
+  const oaiTools = tools.length > 0 ? await convertToolsForOllama(tools) : undefined
 
   logForDebugging(`[Ollama] Sending request to ${baseUrl}/v1/chat/completions model=${model} messages=${oaiMessages.length} tools=${oaiTools?.length ?? 0}`)
 
